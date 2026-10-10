@@ -2,6 +2,7 @@ import sys
 import os
 import asyncio
 import uiautomation as auto
+from comtypes import COMError
 from typing import Dict, Any
 import time
 from . import save
@@ -161,36 +162,67 @@ def lc_detect() -> bool:
         return False
 
 
-async def hook(filename, exit_event):
+def read_caption_text():
+    """Resolve the current UI tree without waiting for controls to appear.
+
+    Control.Name lazily searches and caches a UIA element. Recreate both
+    controls each poll so a missing or replaced window/viewer can recover.
+    Exists(0) performs one search; the async capture loop handles retries.
+    """
+    desktop = auto.GetRootControl()
+    captions_window = desktop.Control(
+        searchDepth=1, ClassName="LiveCaptionsDesktopWindow"
+    )
+    if not captions_window.Exists(0):
+        return None
+    captions_scrollviewer = captions_window.Control(
+        searchDepth=5,
+        AutomationId="CaptionsScrollViewer",
+        ClassName="ScrollViewer",
+    )
+    if not captions_scrollviewer.Exists(0):
+        return None
+    return captions_scrollviewer.Name.strip()
+
+
+async def hook(filename, exit_event, on_status=None):
     global last_full_text, current_sentences
+    last_full_text = ""
+    current_sentences = {}
+    save.saved_captions.clear()
     seen_sentences = set()  # for quick lookup of already saved sentences
+    status = None
+
+    def report_status(new_status):
+        nonlocal status
+        if new_status != status:
+            print(f"[CAPTURE] {new_status}")
+            if on_status is not None:
+                on_status(new_status)
+            status = new_status
 
     try:
-        if not lc_detect():
-            return False
-
-        desktop = auto.GetRootControl()
-        captions_window = desktop.Control(
-            searchDepth=1,
-            ClassName="LiveCaptionsDesktopWindow"
-        )
-        await asyncio.sleep(1)  # Wait for the window not to be empty
-        captions_scrollviewer = captions_window.Control(
-            searchDepth=5,
-            AutomationId="CaptionsScrollViewer",
-            ClassName="ScrollViewer"
-        )
-
         print("Start capture...")
         print(f"Settings: STABLE_THRESHOLD={STABLE_THRESHOLD}, MIN_LENGTH={MIN_LENGTH}, SIMILARITY={SIMILARITY}")
 
         while not exit_event.is_set():
-            current_text = captions_scrollviewer.Name.strip()
+            try:
+                current_text = read_caption_text()
+            except (LookupError, COMError) as e:
+                # The provider can disappear between Exists() and Name.
+                # Keep file/processing failures outside this retry boundary.
+                if status != "Reconnecting":
+                    print(f"[UIA] Caption read failed; retrying: {e!r}")
+                report_status("Reconnecting")
+                await asyncio.sleep(0.5)
+                continue
 
             if not current_text:
+                report_status("Waiting for captions")
                 await asyncio.sleep(0.5)  
                 continue
 
+            report_status("Recording")
             sentences = split_into_sentences(current_text)
 
             current_frame_sentences = set(sentences)
@@ -238,8 +270,8 @@ async def hook(filename, exit_event):
             await asyncio.sleep(0.25) # Adjust the sleep time as needed
 
     except Exception as e:
-        print(f"Exceptions Caught: {e}")
-        return False
+        print(f"[CAPTURE ERROR] {e!r}")
+        raise
 
     finally:    
         # save the last sentences when exit
@@ -278,6 +310,7 @@ async def hook(filename, exit_event):
                         await save_txt(filename,save.saved_captions[-1])
         except Exception as e:
             print(f"Error saving last sentences: {e}")
+            raise
         
         await asyncio.to_thread(deduper.cleanup_file, filename)
         

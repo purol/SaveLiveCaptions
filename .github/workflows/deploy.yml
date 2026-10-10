@@ -34,6 +34,9 @@ jobs:
         echo "Running mypy..."
         mypy src/ --explicit-package-bases --ignore-missing-imports 
 
+    - name: Test caption capture recovery
+      run: python -m unittest discover -s tests -v
+
     - name: Build exe
       run: |
         # Onefile

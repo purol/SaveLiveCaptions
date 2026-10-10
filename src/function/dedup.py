@@ -212,6 +212,7 @@ class Deduplicator:
 
         except Exception as e:
             print(f"[CLEANUP ERROR] {e}")
+            raise
 
 
 
