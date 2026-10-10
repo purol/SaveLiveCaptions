@@ -10,6 +10,17 @@ file_handle = None
 exit_event = asyncio.Event()
 hook_task = None
 
+async def capture(filename, on_status):
+    """Surface fatal errors even in the windowed executable (no console)."""
+    try:
+        try:
+            await hook(filename, exit_event, on_status)
+        finally:
+            await close_file()
+    except Exception as e:
+        on_status("Error")
+        msgbox.showerror("Recording failed", f"Could not save captions to:\n{filename}\n\n{e}")
+
 async def close_all(window):
     global hook_task
     if hook_task is not None:  
@@ -35,13 +46,25 @@ def dashboard(loop):
         exit_event.clear()  
         start_btn.config(state=tk.DISABLED)
         stop_btn.config(state=tk.NORMAL)  
-        filename = choose_save_dir()
-        hook_task = loop.create_task(hook(filename,exit_event))  
+        try:
+            filename = choose_save_dir()
+        except Exception as e:
+            start_btn.config(state=tk.NORMAL)
+            msgbox.showerror("Recording failed", str(e))
+            return
+
+        async def run_capture():
+            await capture(filename, status.set)
+            if not exit_event.is_set():
+                start_btn.config(state=tk.NORMAL)
+
+        status.set("Waiting for captions")
+        hook_task = loop.create_task(run_capture())
         
 
     def stop_capture():
         exit_event.set()
-        start_btn.config(state=tk.NORMAL)
+        start_btn.config(state=tk.DISABLED)
         stop_btn.config(state=tk.DISABLED)
         loop.create_task(close_all(window))
     
@@ -68,6 +91,8 @@ def dashboard(loop):
     start_btn.pack(pady=10)
     stop_btn = tk.Button(window, text="◼", command=stop_capture)
     stop_btn.pack(pady=10)
+    status = tk.StringVar(value="Ready")
+    tk.Label(window, textvariable=status, wraplength=58, font=("Segoe UI", 8)).pack()
 
     def poll_loop():
         loop.call_soon(loop.stop)
